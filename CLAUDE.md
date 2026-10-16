@@ -13,6 +13,9 @@ Give Joe a short usage reminder before anything else:
 - Viewer: http://10.11.99.1:8099/. F fullscreen, H hide panel; presets,
   per-ink color pickers, rotate, crop.
 - It doesn't survive a tablet reboot; `./run` again.
+- `./run put FILE.pdf|URL ...` uploads PDFs/EPUBs (e.g. worksheets straight
+  from the course site). Needs the USB web interface server up; if it
+  isn't, Joe toggles the setting off/on with the cable in.
 
 Then check whether the tablet is reachable (`./run status`) and say so. Keep
 it brief and let Joe drive.
@@ -32,6 +35,14 @@ it brief and let Joe drive.
   grab input devices (EVIOCGRAB), don't restart xochitl or reboot without
   asking. Joe uses this live in lectures.
 - Root filesystem is ~89% full; binaries and files go in `/home/root`.
+- USB web interface: `xochitl.conf` can say `WebInterfaceEnabled=true`
+  while nothing listens on port 80 (seen Oct 2026, fw 3.23). Toggling the
+  setting starts the server. Whether it persists across replug/reboot is
+  unknown; note it here when observed. (`127.0.0.1:8787` is memfaultd,
+  unrelated.)
+- Prefer `./run put` (the upload endpoint) over copying files into
+  xochitl's data dir over ssh: that needs hand-made metadata and an
+  xochitl restart.
 
 ## Building
 

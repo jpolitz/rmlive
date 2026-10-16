@@ -17,7 +17,14 @@ Plug in the tablet (developer mode, `remarkable` ssh alias pointing at
 ./run log          # tablet-side log
 ./run prof         # pull profiling logs and print a summary
 ./run bench        # time read/hash/encode on the tablet
+./run put a.pdf https://…/b.pdf   # upload PDFs/EPUBs, local files or URLs
 ```
+
+`./run put` uses the tablet's USB web interface (`POST /upload`, the
+same import path as the web page, so documents land in the top level with
+proper metadata). The setting can read "on" while the server isn't
+actually running; toggling it off and on with the cable plugged in starts
+it. `./run put` checks first and says so.
 
 `./run [--prof] [interval_ms]` passes its arguments to the binary. The
 default poll interval is 33 ms. The streamer doesn't survive a tablet

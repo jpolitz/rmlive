@@ -8,6 +8,7 @@
 #   ./run log                              tail the tablet-side log
 #   ./run prof                             pull profiling logs and summarize them
 #   ./run bench                            deploy and time read/hash/encode on the tablet
+#   ./run put FILE.pdf|URL ...             upload PDFs/EPUBs (local or URL) to the tablet
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -90,6 +91,36 @@ case "$cmd" in
     check_tablet
     build_and_deploy
     ssh_rm "$REMOTE --bench"
+    ;;
+  put)
+    [[ $# -gt 0 ]] || { echo "usage: ./run put FILE.pdf|URL ..." >&2; exit 1; }
+    WEB=http://10.11.99.1
+    if ! curl -s -m 3 -o /dev/null "$WEB/documents/"; then
+      cat >&2 <<EOF
+The tablet's USB web interface isn't answering. With the cable plugged in,
+toggle the "USB web interface" setting off and back on (it can read "on"
+without the server actually running), then retry.
+EOF
+      exit 1
+    fi
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    for src in "$@"; do
+      f=$src
+      if [[ $src == http://* || $src == https://* ]]; then
+        f="$tmp/$(basename "${src%%\?*}")"
+        curl -sSfL -m 60 -o "$f" "$src" || { echo "download failed: $src" >&2; continue; }
+      fi
+      case "$f" in
+        *.pdf) type=application/pdf ;;
+        *.epub) type=application/epub+zip ;;
+        *) echo "skipping $src: only .pdf and .epub" >&2; continue ;;
+      esac
+      code=$(curl -s -m 60 -o /dev/null -w '%{http_code}' \
+        -H "Origin: $WEB" -H "Referer: $WEB/" \
+        -F "file=@$f;type=$type" "$WEB/upload")
+      if [[ $code == 201 ]]; then echo "uploaded: $(basename "$f")"; else echo "FAILED ($code): $src" >&2; fi
+    done
     ;;
   *)
     sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
