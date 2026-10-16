@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# rmlive launcher. Run from anywhere; talks to the tablet over USB via the
+# `remarkable` ssh alias (override with RM_HOST).
+#
+#   ./run [start] [--prof] [interval_ms]   build, deploy if changed, (re)start, open viewer
+#   ./run stop                             stop the streamer on the tablet
+#   ./run status                           running? which frame? last log lines
+#   ./run log                              tail the tablet-side log
+#   ./run prof                             pull profiling logs and summarize them
+#   ./run bench                            deploy and time read/hash/encode on the tablet
+set -euo pipefail
+cd "$(dirname "$0")"
+
+HOST=${RM_HOST:-remarkable}
+URL=http://10.11.99.1:8099/
+BIN=target/aarch64-unknown-linux-musl/release/rmlive
+REMOTE=/home/root/rmlive
+ssh_rm() { ssh -o ConnectTimeout=5 -o LogLevel=ERROR "$HOST" "$@"; }
+
+check_tablet() {
+  if ! ssh_rm true 2>/dev/null; then
+    cat >&2 <<EOF
+Can't reach the tablet ($HOST). Check:
+  - USB cable plugged in, tablet awake and unlocked
+  - macOS: System Settings > Privacy & Security > Local Network has your
+    terminal app enabled (toggle off/on if it already is). Missing
+    permission shows up as "No route to host" even though the link is up.
+EOF
+    exit 1
+  fi
+}
+
+build_and_deploy() {
+  cargo build --release --quiet
+  local here there
+  here=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
+  there=$(ssh_rm "sha256sum $REMOTE 2>/dev/null | cut -d' ' -f1" || true)
+  if [[ "$here" != "$there" ]]; then
+    echo "deploying new build to $HOST:$REMOTE"
+    scp -q -o LogLevel=ERROR "$BIN" "$HOST:$REMOTE.new"
+    ssh_rm "chmod +x $REMOTE.new && mv $REMOTE.new $REMOTE"
+  fi
+}
+
+cmd=${1:-start}
+[[ $# -gt 0 ]] && shift
+
+case "$cmd" in
+  start)
+    check_tablet
+    build_and_deploy
+    # shellcheck disable=SC2029  # args are meant to expand locally
+    ssh_rm "killall rmlive 2>/dev/null; sleep 0.3; cd /home/root && nohup ./rmlive $* >/tmp/rmlive.log 2>&1 &"
+    for _ in $(seq 1 25); do
+      curl -s -m 1 -o /dev/null "$URL" && break
+      sleep 0.2
+    done
+    if ! curl -s -m 1 -o /dev/null "$URL"; then
+      echo "streamer didn't come up; log:" >&2
+      ssh_rm 'cat /tmp/rmlive.log' >&2
+      exit 1
+    fi
+    ssh_rm 'cat /tmp/rmlive.log'
+    open "$URL"
+    ;;
+  stop)
+    check_tablet
+    ssh_rm 'killall rmlive 2>/dev/null && echo stopped || echo "not running"'
+    ;;
+  status)
+    check_tablet
+    ssh_rm 'if pidof rmlive >/dev/null; then echo "running: $(tr "\0" " " </proc/$(pidof rmlive)/cmdline)"; else echo "not running"; fi; echo "--- /tmp/rmlive.log"; tail -n 5 /tmp/rmlive.log 2>/dev/null'
+    echo "viewer: $URL"
+    ;;
+  log)
+    check_tablet
+    ssh_rm 'tail -n 50 /tmp/rmlive.log'
+    ;;
+  prof)
+    check_tablet
+    dir="prof/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$dir"
+    for f in rmlive-prof.jsonl rmlive-client.jsonl rmlive.log; do
+      scp -q -o LogLevel=ERROR "$HOST:/tmp/$f" "$dir/" 2>/dev/null || echo "missing /tmp/$f (was it started with --prof?)" >&2
+    done
+    python3 -I tools/analyze_prof.py "$dir"
+    echo "raw logs: $dir"
+    ;;
+  bench)
+    check_tablet
+    build_and_deploy
+    ssh_rm "$REMOTE --bench"
+    ;;
+  *)
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac

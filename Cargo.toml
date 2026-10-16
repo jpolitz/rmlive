@@ -1,0 +1,13 @@
+[package]
+name = "rmlive"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2.190"
+miniz_oxide = "0.8"
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = true

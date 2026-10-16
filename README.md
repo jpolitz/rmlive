@@ -1,0 +1,113 @@
+# rmlive
+
+Live view of a reMarkable Paper Pro's screen in a browser, over the USB
+cable, with recolorable inks for projecting. One small Rust binary runs on
+the tablet; the viewer is a page it serves.
+
+## Usage
+
+Plug in the tablet (developer mode, `remarkable` ssh alias pointing at
+`root@10.11.99.1`), then:
+
+```
+./run              # build, deploy if changed, (re)start, open http://10.11.99.1:8099/
+./run --prof       # same, with profiling logs on
+./run stop         # stop it on the tablet
+./run status       # running? what does the log say?
+./run log          # tablet-side log
+./run prof         # pull profiling logs and print a summary
+./run bench        # time read/hash/encode on the tablet
+```
+
+`./run [--prof] [interval_ms]` passes its arguments to the binary. The
+default poll interval is 33 ms. The streamer doesn't survive a tablet
+reboot; `./run` again.
+
+### Viewer controls
+
+- **Presets:** Projector (dark, readable inks on white), Dark (light inks on
+  dark), Original.
+- **Inks:** one color picker per pen color; ↺ resets one. "Detect inks on
+  page" adds any other saturated color it finds (it also runs on connect).
+- **Background**, **rotate**, **crop** (e.g. Crop L ≈ 110 hides the portrait
+  toolbar).
+- **F** fullscreen, **H** hide the panel. Panel and cursor hide when the
+  mouse is still. Settings persist in the browser's localStorage.
+- Bottom-left status shows KB/s and updates/s.
+
+## How it works
+
+**Finding the screen.** xochitl (the reMarkable UI) renders the page into a
+malloc'd RGBA buffer: 1632-pixel rows (1620 visible + 12 padding), 2160
+rows, upright, full color. It sits on a page boundary with a 16-byte glibc
+chunk header whose size field is `0xD73000 | flags`. A second, same-sized
+allocation holds the gray e-ink buffer (1 level byte + 3 unused per pixel,
+17 gray levels, rotated); the alpha byte tells them apart (255 in the color
+frame, 0 in the gray one). `find_frames` scans xochitl's rw mappings for
+that header and checks alpha. There's no `/dev/fb0` on this device, only
+DRM.
+
+**Polling** (`capture_loop`). Every 33 ms: read the frame in 16-row bands
+with `process_vm_readv` (2× faster than `/proc/<pid>/mem`) and hash each
+64×64 tile's slice of the band while it's in cache. Tiles whose hash changed
+are dirty. Comparing against the previous frame instead was
+memory-bandwidth-bound and twice as slow. Ticks take ~20 ms.
+
+**Sending** (`stream_to`). Each viewer has a pending set of dirty tiles plus
+the newest frame, not a queue. Its connection thread encodes and writes
+whenever its previous write finished, so a slow viewer skips intermediate
+frames instead of falling behind. Big updates (≥64 tiles) are compressed on
+two threads and go out as two messages.
+
+**Wire format.** A long-lived `GET /stream` response carrying messages:
+12-byte header (u32 LE payload length, seq, server ms), then raw deflate of
+`u16 count` followed by, per tile, `u16 x, y, w, h` and `w*h` RGB bytes.
+
+**Recoloring** (in the page). Pens are stored as pure primaries (`#00ff00`,
+`#ffff00`, `#0000ff`, `#000000`). Each pixel is read as
+`white + a·(ink − white)`; the page finds the closest ink, keeps `a`, and
+substitutes the chosen ink and background, so anti-aliasing survives.
+Pixels no ink explains (UI chrome) pass through. Results are memoized per
+palette.
+
+## Performance (Oct 2026, firmware 3.23.0.64, profiled)
+
+| | median |
+|---|---|
+| pen down → change seen by the poller | 45 ms |
+| tick (read + hash) | 20.5 ms |
+| small update: change seen → written | 22 ms |
+| big update (zoom): change seen → written | 87 ms (encode ~39 ms on 2 threads) |
+| viewer: inflate + apply + paint | ~6 ms |
+
+Streamer CPU is about half of one of the four cores while a viewer is
+connected (it idles when none is).
+
+## Profiling
+
+`./run --prof` makes the tablet write per-tick and per-send JSONL to
+`/tmp/rmlive-prof.jsonl`, log pen down/up from `/dev/input/event2`, and
+accept viewer timings at `POST /clientstats` (→ `/tmp/rmlive-client.jsonl`).
+`./run prof` pulls those into `prof/<timestamp>/` and runs
+`tools/analyze_prof.py`. `/tmp` on the tablet is RAM, so don't leave
+`--prof` on for days.
+
+## Troubleshooting
+
+- **"No route to host" with the cable in:** macOS Local Network permission
+  for your terminal app (System Settings → Privacy & Security → Local
+  Network). Also check the tablet is awake.
+- **Viewer says disconnected:** `./run status`, then `./run`.
+- **"0 color frame(s)" in the log:** a firmware update probably changed the
+  buffer's size or layout. The recipe that found it: dump xochitl's large
+  anonymous rw mappings via `/proc/<pid>/maps` + `dd` on `/proc/<pid>/mem`,
+  then look for 4-byte-per-pixel data with a 1632-pixel stride.
+
+## Layout
+
+- `src/main.rs`: the streamer: frame discovery, polling, HTTP, profiling, bench
+- `src/index.html`: the viewer, embedded in the binary via `include_str!`
+- `run`: launcher
+- `tools/analyze_prof.py`: profile summary
+- `.cargo/config.toml`: cross-compiles to static `aarch64-unknown-linux-musl`
+  with `rust-lld`

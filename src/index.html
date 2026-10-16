@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rmlive</title>
+<style>
+  :root { --panel: rgba(28,28,30,.92); --fg: #eee; --muted: #999; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { background: var(--bg, #fff); font: 13px/1.35 -apple-system, system-ui, sans-serif; }
+  #view { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: contain; }
+  #status { position: fixed; left: 8px; bottom: 6px; color: var(--muted); font-size: 11px; transition: opacity .4s; }
+  #panel { position: fixed; top: 10px; right: 10px; width: 290px; max-height: calc(100vh - 20px); overflow: auto;
+           background: var(--panel); color: var(--fg); border-radius: 10px; padding: 12px 14px;
+           box-shadow: 0 6px 24px rgba(0,0,0,.35); transition: opacity .3s; }
+  body.idle #panel, body.idle #status { opacity: 0; pointer-events: none; }
+  body.idle { cursor: none; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 12px 0 6px; }
+  h2:first-child { margin-top: 0; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .sw { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #555; flex: none; }
+  .hex { font-family: ui-monospace, monospace; color: var(--muted); width: 62px; }
+  input[type=color] { width: 36px; height: 22px; border: 0; padding: 0; background: none; }
+  input[type=number] { width: 52px; background: #333; color: var(--fg); border: 1px solid #555; border-radius: 4px; }
+  select, button { background: #3a3a3c; color: var(--fg); border: 1px solid #555; border-radius: 5px; padding: 3px 8px; font: inherit; }
+  button:hover { background: #48484a; }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; }
+  .grid { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 8px; align-items: center; }
+  .hint { color: var(--muted); font-size: 11px; margin-top: 10px; }
+  .x { margin-left: auto; color: var(--muted); cursor: pointer; background: none; border: 0; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="status">connecting…</div>
+<div id="panel">
+  <h2>Presets</h2>
+  <div class="presets">
+    <button data-preset="projector">Projector</button>
+    <button data-preset="dark">Dark</button>
+    <button data-preset="original">Original</button>
+  </div>
+  <h2>Background</h2>
+  <div class="row"><span class="sw" style="background:#fff"></span><span class="hex">#ffffff</span>→<input type="color" id="bg"></div>
+  <h2>Inks</h2>
+  <div id="inks"></div>
+  <div class="row"><button id="detect">Detect inks on page</button></div>
+  <h2>View</h2>
+  <div class="row">Rotate <select id="rot"><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select>
+    <button id="fs" style="margin-left:auto">Fullscreen</button></div>
+  <div class="grid">
+    <span>Crop L</span><input type="number" id="cl" min="0" step="10">
+    <span>R</span><input type="number" id="cr" min="0" step="10">
+    <span>Crop T</span><input type="number" id="ct" min="0" step="10">
+    <span>B</span><input type="number" id="cb" min="0" step="10">
+  </div>
+  <div class="hint">Panel hides when the mouse is still. H toggles it, F toggles fullscreen.</div>
+</div>
+<script>
+const W = 1620, H = 2160;
+const raw = new Uint32Array(W * H);                    // received pixels as 0xRRGGBB
+const buf = document.createElement('canvas'); buf.width = W; buf.height = H;
+const bctx = buf.getContext('2d');
+const out = bctx.createImageData(W, H);                // recolored
+const out32 = new Uint32Array(out.data.buffer);        // little-endian: 0xAABBGGRR
+const view = document.getElementById('view'), vctx = view.getContext('2d');
+const $ = id => document.getElementById(id);
+
+// ---------- settings ----------
+const PRESETS = {
+  projector: { bg: '#ffffff', inks: { '#000000': '#000000', '#00ff00': '#1a7f37', '#ffff00': '#b35c00', '#0000ff': '#1f4fd1' } },
+  dark:      { bg: '#15171c', inks: { '#000000': '#f2f2f2', '#00ff00': '#5fd38d', '#ffff00': '#ffc04d', '#0000ff': '#7aa7ff' } },
+  original:  { bg: '#ffffff', inks: { '#000000': '#000000', '#00ff00': '#00ff00', '#ffff00': '#ffff00', '#0000ff': '#0000ff' } },
+};
+let S = { ...structuredClone(PRESETS.projector), rot: 0, crop: [0, 0, 0, 0] };
+try { const saved = JSON.parse(localStorage.getItem('rmlive') || 'null'); if (saved) S = { ...S, ...saved }; } catch {}
+const save = () => { try { localStorage.setItem('rmlive', JSON.stringify(S)); } catch {} };
+
+const hex2 = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+const rgb2hex = (r, g, b) => '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+
+// ---------- recolor ----------
+// Each pixel is treated as white + a*(ink - white). Keep a, swap the ink,
+// and blend against the new background. Pixels no ink explains pass through.
+// recolor() maps 0xRRGGBB -> canvas pixel 0xAABBGGRR, memoized per palette.
+let model, cache, cacheMisses = 0;
+function buildModel() {
+  const B = [255, 255, 255], B2 = hex2(S.bg);
+  model = Object.entries(S.inks).map(([src, dst]) => {
+    const C = hex2(src), d = C.map((c, i) => c - B[i]);
+    return { d, dd: d[0] * d[0] + d[1] * d[1] + d[2] * d[2] || 1, C2: hex2(dst) };
+  });
+  model.B2 = B2;
+  cache = new Map();
+  document.body.style.setProperty('--bg', S.bg);
+}
+const abgr = (r, g, b) => (0xff000000 | (b << 16) | (g << 8) | r) >>> 0;
+function recolor(key) {
+  let v = cache.get(key);
+  if (v !== undefined) return v;
+  cacheMisses++;
+  const r = key >>> 16, g = (key >>> 8) & 255, b = key & 255;
+  const pr = r - 255, pg = g - 255, pb = b - 255;
+  let best = Infinity, a0 = 0, m0 = null;
+  for (const m of model) {
+    let a = (pr * m.d[0] + pg * m.d[1] + pb * m.d[2]) / m.dd;
+    a = a < 0 ? 0 : a > 1 ? 1 : a;
+    const er = pr - a * m.d[0], eg = pg - a * m.d[1], eb = pb - a * m.d[2];
+    const res = er * er + eg * eg + eb * eb;
+    if (res < best) { best = res; a0 = a; m0 = m; }
+  }
+  const B2 = model.B2;
+  if (best > 20 * 20 || !m0) v = abgr(r, g, b);
+  else v = abgr(Math.round(B2[0] + a0 * (m0.C2[0] - B2[0])),
+                Math.round(B2[1] + a0 * (m0.C2[1] - B2[1])),
+                Math.round(B2[2] + a0 * (m0.C2[2] - B2[2])));
+  cache.set(key, v);
+  return v;
+}
+function recolorAll() {
+  buildModel();
+  let lastK = -1, lastV = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const k = raw[i];
+    if (k !== lastK) { lastK = k; lastV = recolor(k); }
+    out32[i] = lastV;
+  }
+  bctx.putImageData(out, 0, 0);
+  schedule();
+}
+
+// ---------- view ----------
+let pending = false;
+function schedule() { if (!pending) { pending = true; requestAnimationFrame(draw); } }
+function draw() {
+  pending = false;
+  const t = performance.now();
+  const [cl, cr, ct, cb] = S.crop;
+  const sw = Math.max(1, W - cl - cr), sh = Math.max(1, H - ct - cb);
+  const side = S.rot % 180 !== 0;
+  const cw = side ? sh : sw, ch = side ? sw : sh;
+  if (view.width !== cw || view.height !== ch) { view.width = cw; view.height = ch; }
+  vctx.save();
+  vctx.translate(cw / 2, ch / 2);
+  vctx.rotate(S.rot * Math.PI / 180);
+  vctx.drawImage(buf, cl, ct, sw, sh, -sw / 2, -sh / 2, sw, sh);
+  vctx.restore();
+  const done = performance.now();
+  for (const r of unpainted) { r.paint_ms = +(done - r.recv).toFixed(1); r.draw_ms = +(done - t).toFixed(2); }
+  unpainted = [];
+}
+
+// ---------- profiling ----------
+// One record per message; posted to the tablet every 2 s (-> /tmp/rmlive-client.jsonl).
+let prof = [], unpainted = [];
+function flushProf() {
+  if (!prof.length) return;
+  const batch = prof; prof = [];
+  fetch('/clientstats', { method: 'POST', body: JSON.stringify(batch) }).catch(() => {});
+}
+setInterval(flushProf, 2000);
+
+// ---------- stream ----------
+const status = $('status');
+let bytes = 0, msgs = 0, t0 = performance.now();
+async function handle(payload, rec) {
+  let t = performance.now();
+  const ab = await new Response(new Blob([payload]).stream()
+    .pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer();
+  rec.inflate_ms = performance.now() - t;
+  rec.raw_b = ab.byteLength;
+  t = performance.now();
+  const missBefore = cacheMisses;
+  const dv = new DataView(ab), u8 = new Uint8Array(ab);
+  const n = dv.getUint16(0, true);
+  let p = 2, x0 = W, y0 = H, x1 = 0, y1 = 0, lastK = -1, lastV = 0;
+  for (let t = 0; t < n; t++) {
+    const x = dv.getUint16(p, true), y = dv.getUint16(p + 2, true),
+          w = dv.getUint16(p + 4, true), h = dv.getUint16(p + 6, true);
+    p += 8;
+    if (x < x0) x0 = x; if (y < y0) y0 = y; if (x + w > x1) x1 = x + w; if (y + h > y1) y1 = y + h;
+    for (let row = y; row < y + h; row++) {
+      let i = row * W + x;
+      const end = i + w;
+      for (; i < end; i++, p += 3) {
+        const k = (u8[p] << 16) | (u8[p + 1] << 8) | u8[p + 2];
+        raw[i] = k;
+        if (k !== lastK) { lastK = k; lastV = recolor(k); }
+        out32[i] = lastV;
+      }
+    }
+  }
+  if (n) bctx.putImageData(out, 0, 0, x0, y0, x1 - x0, y1 - y0);
+  rec.apply_ms = performance.now() - t;
+  rec.tiles = n;
+  rec.misses = cacheMisses - missBefore;
+  schedule();
+  return n;
+}
+let srvOffset = Infinity;   // min(client recv - server ms): baseline for lag
+async function connect() {
+  try {
+    status.textContent = 'connecting…';
+    srvOffset = Infinity;   // server clock restarts with the process
+    const res = await fetch('/stream', { cache: 'no-store' });
+    const reader = res.body.getReader();
+    let acc = new Uint8Array(0), first = true;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const tChunk = performance.now();
+      bytes += value.length;
+      const nb = new Uint8Array(acc.length + value.length); nb.set(acc); nb.set(value, acc.length); acc = nb;
+      const concat_ms = performance.now() - tChunk;
+      while (acc.length >= 12) {
+        const hv = new DataView(acc.buffer, acc.byteOffset);
+        const len = hv.getUint32(0, true), seq = hv.getUint32(4, true), srv = hv.getUint32(8, true);
+        if (acc.length < 12 + len) break;
+        const recv = performance.now();
+        srvOffset = Math.min(srvOffset, recv - srv);
+        const rec = { seq, srv, recv: +recv.toFixed(1), lag_ms: +(recv - srv - srvOffset).toFixed(1),
+                      z_b: len, concat_ms: +concat_ms.toFixed(2), backlog_b: acc.length - 12 - len };
+        const n = await handle(acc.subarray(12, 12 + len), rec);
+        acc = acc.slice(12 + len);
+        rec.slice_ms = +(performance.now() - recv - rec.inflate_ms - rec.apply_ms).toFixed(2);
+        rec.inflate_ms = +rec.inflate_ms.toFixed(2); rec.apply_ms = +rec.apply_ms.toFixed(2);
+        prof.push(rec); unpainted.push(rec);
+        msgs++;
+        if (first) { first = false; detectInks(false); }
+      }
+      const dt = (performance.now() - t0) / 1000;
+      if (dt > 1) { status.textContent = `live · ${(bytes / dt / 1024).toFixed(0)} KB/s · ${(msgs / dt).toFixed(1)} updates/s`; bytes = 0; msgs = 0; t0 = performance.now(); }
+    }
+  } catch (e) { console.warn(e); }
+  status.textContent = 'disconnected — retrying';
+  setTimeout(connect, 1000);
+}
+
+// ---------- ink detection: saturated exact colors that cover real area ----------
+function detectInks(announce) {
+  const counts = new Map();
+  for (let i = 0; i < raw.length; i += 4) {           // sample every 4th pixel
+    const k = raw[i], r = k >>> 16, g = (k >>> 8) & 255, b = k & 255;
+    if (Math.max(r, g, b) - Math.min(r, g, b) < 40) continue;   // gray axis: black ink/AA/UI
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  let added = 0;
+  for (const [k, n] of counts) {
+    if (n < 150) continue;
+    const hx = rgb2hex(k >>> 16, (k >>> 8) & 255, k & 255);
+    if (!(hx in S.inks)) { S.inks[hx] = hx; added++; }
+  }
+  if (added || announce) { save(); renderInks(); recolorAll(); }
+  if (announce) status.textContent = added ? `added ${added} ink(s)` : 'no new inks found';
+}
+
+// ---------- panel ----------
+function renderInks() {
+  const box = $('inks'); box.innerHTML = '';
+  for (const [src, dst] of Object.entries(S.inks)) {
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<span class="sw" style="background:${src}"></span><span class="hex">${src}</span>→`;
+    const inp = document.createElement('input'); inp.type = 'color'; inp.value = dst;
+    inp.oninput = () => { S.inks[src] = inp.value; save(); recolorAll(); };
+    const x = document.createElement('button'); x.className = 'x'; x.title = 'reset to original'; x.textContent = '↺';
+    x.onclick = () => { S.inks[src] = src; inp.value = src; save(); recolorAll(); };
+    row.append(inp, x); box.append(row);
+  }
+}
+function syncPanel() {
+  $('bg').value = S.bg; $('rot').value = S.rot;
+  ['cl', 'cr', 'ct', 'cb'].forEach((id, i) => $(id).value = S.crop[i]);
+  renderInks();
+}
+$('bg').oninput = e => { S.bg = e.target.value; save(); recolorAll(); };
+$('rot').onchange = e => { S.rot = +e.target.value; save(); schedule(); };
+['cl', 'cr', 'ct', 'cb'].forEach((id, i) => $(id).oninput = e => { S.crop[i] = Math.max(0, +e.target.value || 0); save(); schedule(); });
+$('detect').onclick = () => detectInks(true);
+document.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => {
+  const p = structuredClone(PRESETS[b.dataset.preset]);
+  // keep any extra detected inks, mapped to themselves
+  for (const k of Object.keys(S.inks)) if (!(k in p.inks)) p.inks[k] = b.dataset.preset === 'original' ? k : S.inks[k];
+  S.bg = p.bg; S.inks = p.inks; save(); syncPanel(); recolorAll();
+});
+const toggleFs = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+$('fs').onclick = toggleFs;
+let idleT, forced = null;
+function wake() { if (forced === 'hidden') return; document.body.classList.remove('idle'); clearTimeout(idleT);
+  idleT = setTimeout(() => { if (!$('panel').matches(':hover')) document.body.classList.add('idle'); }, 2500); }
+addEventListener('mousemove', wake);
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'f') toggleFs();
+  if (e.key === 'h') { forced = forced === 'hidden' ? null : 'hidden'; document.body.classList.toggle('idle', forced === 'hidden'); }
+});
+
+raw.fill(0xffffff); syncPanel(); recolorAll(); wake(); connect();
+</script>
+</body>
+</html>
