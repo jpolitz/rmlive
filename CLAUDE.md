@@ -13,10 +13,13 @@ Give Joe a short usage reminder before anything else:
 - Viewer: http://10.11.99.1:8099/. F fullscreen, H hide panel; presets,
   per-ink color pickers, rotate, crop.
 - It doesn't survive a tablet reboot; `./run` again.
-- `./run put [--replace] FILE.pdf|URL ...` uploads PDFs/EPUBs (e.g. worksheets straight
+- `./run put [--replace] [--folder F] FILE.pdf|URL ...` uploads PDFs/EPUBs (e.g. worksheets straight
   from the course site). Needs the USB web interface server up; if it
-  isn't, Joe toggles the setting off/on with the cable in. `--replace`
-  swaps out the same-named document instead of adding a duplicate.
+  isn't, Joe toggles the setting off/on with the cable in. `--folder F`
+  puts it in folder F (created if missing). `--replace` swaps out the
+  same-named document (within F if given) instead of adding a duplicate.
+  Joe's pattern: duplicates pile up in a drafts folder (e.g.
+  `CSE11FA26-drafts`), one true copy per document in the class folder.
 - `./run ls` lists documents; `./run get NAME|ID|--last ...` downloads them
   as PDFs with ink into the current directory (`-o DIR` elsewhere).
 
@@ -39,7 +42,8 @@ it brief and let Joe drive.
 - **Read-only toward xochitl.** Never write to `/proc/<pid>/mem`, never
   grab input devices (EVIOCGRAB), don't restart xochitl or reboot without
   asking. Joe uses this live in lectures. The one sanctioned exception is
-  `put --replace` (Joe chose it, Oct 2026): it edits the data dir
+  `put --replace` and folder creation in `put --folder` (Joe chose these,
+  Oct 2026): they edit the data dir
   (`~/.local/share/remarkable/xochitl`) with xochitl stopped, then starts
   it. Back up a document's files before experimenting on it.
 - Document format: `<id>.metadata` (name, `parent` folder, type),

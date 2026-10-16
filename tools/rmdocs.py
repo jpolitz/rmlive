@@ -1,27 +1,33 @@
-"""List documents on the tablet and download them as PDFs (ink included),
-via the USB web interface. Called by `./run ls` and `./run get`.
+"""Documents on the tablet via the USB web interface. Called by `./run`.
 
   rmdocs.py ls
   rmdocs.py get [-o DIR] (NAME | ID | --last) ...
-  rmdocs.py replace FILE.pdf
+  rmdocs.py put [--replace] [--folder PATH] FILE ...
 
-NAME matches exactly (case-insensitive, ".pdf" optional) if anything does,
-otherwise as a substring; every match is downloaded.
+get: NAME matches exactly (case-insensitive, ".pdf" optional) if anything
+does, otherwise as a substring; every match is downloaded as a PDF with ink.
 
-replace uploads FILE and makes it the one document with that name, in the
-old one's folder. If the old one has ink, the new PDF goes into the old
-document instead (ink stays on its pages), which needs the same page count.
-Both edit xochitl's files over ssh with xochitl stopped.
+put: uploads PDFs/EPUBs. --folder puts them in PATH ("A/B" nests), creating
+folders as needed. --replace makes FILE the one document with that name (in
+--folder if given, else anywhere): if the old one has ink, the new PDF goes
+into the old document instead (ink stays on its pages), which needs the same
+page count. The web interface can't create folders, move, or delete, so
+those edit xochitl's files over ssh with xochitl stopped: one restart per run.
 """
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
+import uuid
 
 WEB = "http://10.11.99.1"
 HOST = os.environ.get("RM_HOST", "remarkable")
 DATA = "/home/root/.local/share/remarkable/xochitl"
+
+# Shell commands to run in DATA with xochitl stopped, all in one restart.
+EDITS = []
 
 
 # HTTP goes through curl rather than urllib: macOS grants Local Network access
@@ -39,25 +45,40 @@ def fetch(path, timeout=10):
     return curl("-f", WEB + path, timeout=timeout)
 
 
-def upload(path):
-    """POST to /upload like the web page does. Returns the new document's ID."""
-    before = {d["ID"] for _, d in walk()}
-    name = os.path.basename(path)
-    code = curl("-o", "/dev/null", "-w", "%{http_code}", "-H", f"Origin: {WEB}",
-                "-F", f"file=@{path};type=application/pdf", WEB + "/upload", timeout=60)
-    if code != b"201":
-        sys.exit(f"upload failed ({code.decode()}): {name}")
-    for _ in range(20):
-        new = [d["ID"] for _, d in walk() if d["ID"] not in before]
-        if new:
-            return new[0]
-        time.sleep(0.5)
-    sys.exit(f"uploaded {name} but it never appeared in the document list")
-
-
 def ssh(cmd):
     return subprocess.run(["ssh", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR", HOST, cmd],
                           check=True, capture_output=True, text=True).stdout
+
+
+def set_parent(doc_id, parent):
+    EDITS.append(f"sed -i 's/\"parent\": \"[^\"]*\"/\"parent\": \"{parent}\"/' {doc_id}.metadata")
+
+
+def upload(path, folder=""):
+    """POST to /upload like the web page does, into `folder` (an ID, "" = top
+    level). Returns the new document's ID."""
+    if folder:
+        # The web page uploads into the folder it's showing; browsing there
+        # first may be enough. If not, the document gets moved afterwards.
+        # A folder created in this run doesn't exist yet, hence no check=True.
+        subprocess.run(["curl", "-s", "-m", "5", "-o", "/dev/null", "-H", f"Referer: {WEB}/",
+                        f"{WEB}/documents/{folder}"])
+    before = {d["ID"] for _, d in walk()}
+    name = os.path.basename(path)
+    kind = "application/epub+zip" if name.lower().endswith(".epub") else "application/pdf"
+    code = curl("-o", "/dev/null", "-w", "%{http_code}", "-H", f"Origin: {WEB}",
+                "-F", f"file=@{path};type={kind}", WEB + "/upload", timeout=60)
+    if code != b"201":
+        raise RuntimeError(f"upload failed ({code.decode()})")
+    for _ in range(20):
+        new = [d for _, d in walk() if d["ID"] not in before]
+        if new:
+            if new[0].get("Parent", "") != folder:
+                print(f"{name}: moving into its folder (needs an xochitl restart)")
+                set_parent(new[0]["ID"], folder)
+            return new[0]["ID"]
+        time.sleep(0.5)
+    raise RuntimeError("uploaded but it never appeared in the document list")
 
 
 def pdf_pages(path):
@@ -72,9 +93,14 @@ def pdf_pages(path):
     return None
 
 
-def restart_xochitl(edits):
-    """Run shell `edits` in the data dir with xochitl stopped, then start it."""
-    ssh(f"systemctl stop xochitl && cd {DATA} && {{ {edits} ; }}; systemctl start xochitl")
+def apply_edits():
+    """Run EDITS with xochitl stopped, then start it and wait for the web interface."""
+    if not EDITS:
+        return
+    print("restarting xochitl to apply changes...")
+    script = " && ".join(EDITS)
+    ssh(f"systemctl stop xochitl && cd {DATA} && {{ {script} ; }}; systemctl start xochitl")
+    EDITS.clear()
     for _ in range(60):
         if subprocess.run(["curl", "-sf", "-m", "2", "-o", "/dev/null", WEB + "/documents/"]).returncode == 0:
             return
@@ -83,44 +109,111 @@ def restart_xochitl(edits):
           " toggle it off/on if it stays down", file=sys.stderr)
 
 
-def replace(path):
+def folders(parent="", prefix=""):
+    """{path: ID} for every folder."""
+    out = {}
+    for d in json.loads(fetch(f"/documents/{parent}" if parent else "/documents/")):
+        if d["Type"] == "CollectionType":
+            path = prefix + d["VissibleName"]
+            out[path] = d["ID"]
+            out.update(folders(d["ID"], path + "/"))
+    return out
+
+
+def ensure_folder(path):
+    """ID of folder `path`, queueing creation of any missing parts."""
+    known = folders()
+    parent, sofar = "", ""
+    for part in [p for p in path.split("/") if p]:
+        sofar = f"{sofar}/{part}" if sofar else part
+        if sofar in known:
+            parent = known[sofar]
+            continue
+        fid, now = str(uuid.uuid4()), str(int(time.time() * 1000))
+        meta = {"createdTime": now, "lastModified": now, "new": False, "parent": parent,
+                "pinned": False, "source": "", "type": "CollectionType", "visibleName": part}
+        EDITS.append(f"printf %s {shlex.quote(json.dumps(meta, indent=4))} > {fid}.metadata && "
+                     f"printf %s {shlex.quote(json.dumps({'tags': []}))} > {fid}.content")
+        print(f"creating folder: {sofar}")
+        parent = fid
+    return parent
+
+
+def replace(path, docs, folder):
+    """Queue making `path` the one document with its name (within `folder`
+    if not None). Returns a message."""
     name = os.path.basename(path)
-    olds = [(p, d) for p, d in walk() if stem(d["VissibleName"]).lower() == stem(name).lower()]
+    olds = [(p, d) for p, d in docs if stem(d["VissibleName"]).lower() == stem(name).lower()
+            and (folder is None or d.get("Parent", "") == folder)]
     if not olds:
-        upload(path)
-        print(f"uploaded: {name} (nothing to replace)")
-        return
+        upload(path, folder or "")
+        return f"uploaded: {name} (nothing to replace)"
     if len(olds) > 1:
         listing = "\n".join(f"  {p}  [{d['ID']}]" for p, d in olds)
-        sys.exit(f"--replace: {len(olds)} documents named {stem(name)!r}, not sure which:\n{listing}")
+        raise RuntimeError(f"{len(olds)} documents named {stem(name)!r}, not sure which:\n{listing}")
     old_path, old = olds[0]
     oid = old["ID"]
-    info = json.loads(ssh(f"cd {DATA} && printf '{{\"ink\": %s, \"meta\": ' "
-                          f"$(ls {oid}/*.rm 2>/dev/null | wc -l) && cat {oid}.metadata && "
-                          f"printf ', \"content\": ' && cat {oid}.content && printf '}}'"))
-    parent = info["meta"]["parent"]
+    info = json.loads(ssh(f"cd {DATA} && printf '{{\"ink\": %s, \"content\": ' "
+                          f"$(ls {oid}/*.rm 2>/dev/null | wc -l) && cat {oid}.content && printf '}}'"))
     if info["ink"] == 0:
-        new = upload(path)
-        restart_xochitl(f"rm -rf {oid} {oid}.* && "
-                        f"sed -i 's/\"parent\": \"[^\"]*\"/\"parent\": \"{parent}\"/' {new}.metadata")
-        print(f"replaced: {old_path}")
-        return
+        upload(path, old.get("Parent", ""))
+        EDITS.append(f"rm -rf {oid} {oid}.*")
+        return f"replaced: {old_path}"
     # Ink lives on page entries that point at original PDF pages, so swap the PDF
     # underneath them, which only makes sense if the pages line up.
     c = info["content"]  # formatVersion 2 has cPages; 1 (fresh uploads) has originalPageCount
     have = c["cPages"]["original"]["value"] if "cPages" in c else c.get("originalPageCount")
     want = pdf_pages(path)
     if want != have:
-        sys.exit(f"--replace: {old_path} has ink and {have} pages, the new PDF has "
-                 f"{want if want is not None else 'an unknown number of'} pages; refusing so the ink "
-                 f"doesn't land on the wrong pages. Plain ./run put keeps both.")
+        raise RuntimeError(f"{old_path} has ink and {have} pages, the new PDF has "
+                           f"{want if want is not None else 'an unknown number of'} pages; refusing so "
+                           f"the ink doesn't land on the wrong pages. Plain ./run put keeps both.")
     subprocess.run(["scp", "-q", "-o", "LogLevel=ERROR", path, f"{HOST}:{DATA}/{oid}.pdf.new"], check=True)
     now = int(time.time() * 1000)
     size = os.path.getsize(path)
-    restart_xochitl(f"mv {oid}.pdf.new {oid}.pdf && rm -rf {oid}.thumbnails && "
-                    f"sed -i 's/\"lastModified\": \"[0-9]*\"/\"lastModified\": \"{now}\"/' {oid}.metadata && "
-                    f"sed -i 's/\"sizeInBytes\": \"[0-9]*\"/\"sizeInBytes\": \"{size}\"/' {oid}.content")
-    print(f"replaced: {old_path} (kept ink on {info['ink']} page(s))")
+    EDITS.append(f"mv {oid}.pdf.new {oid}.pdf && rm -rf {oid}.thumbnails && "
+                 f"sed -i 's/\"lastModified\": \"[0-9]*\"/\"lastModified\": \"{now}\"/' {oid}.metadata && "
+                 f"sed -i 's/\"sizeInBytes\": \"[0-9]*\"/\"sizeInBytes\": \"{size}\"/' {oid}.content")
+    return f"replaced: {old_path} (kept ink on {info['ink']} page(s))"
+
+
+def put(args):
+    replacing, folder, files = False, None, []
+    while args:
+        a = args.pop(0)
+        if a == "--replace":
+            replacing = True
+        elif a == "--folder":
+            if not args:
+                sys.exit("--folder needs a name")
+            folder = args.pop(0)
+        else:
+            files.append(a)
+    if not files:
+        sys.exit("usage: ./run put [--replace] [--folder PATH] FILE.pdf|URL ...")
+    fid = ensure_folder(folder) if folder else None
+    docs = list(walk())
+    failed, done = False, []
+    for f in files:
+        name = os.path.basename(f)
+        try:
+            if not name.lower().endswith((".pdf", ".epub")):
+                raise RuntimeError("only .pdf and .epub")
+            if not os.path.isfile(f):
+                raise RuntimeError("no such file")
+            if replacing:
+                if not name.lower().endswith(".pdf"):
+                    raise RuntimeError("--replace is PDF-only")
+                done.append(replace(f, docs, fid))
+            else:
+                upload(f, fid or "")
+                done.append(f"uploaded: {name}" + (f" -> {folder}/" if folder else ""))
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            print(f"FAILED: {name}: {e}", file=sys.stderr)
+            failed = True
+    apply_edits()
+    print("\n".join(done))
+    sys.exit(1 if failed else 0)
 
 
 def walk(folder="", prefix=""):
@@ -150,12 +243,10 @@ def select(docs, wanted):
 
 
 def main(argv):
-    if not argv or argv[0] not in ("ls", "get", "replace"):
+    if not argv or argv[0] not in ("ls", "get", "put"):
         sys.exit(__doc__)
-    if argv[0] == "replace":
-        for path in argv[1:]:
-            replace(path)
-        return
+    if argv[0] == "put":
+        put(argv[1:])
     docs = sorted(walk(), key=lambda pd: pd[1]["ModifiedClient"], reverse=True)
     if argv[0] == "ls":
         # Tablet clock is unreliable, so the dates are only good for ordering.

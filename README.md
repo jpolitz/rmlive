@@ -19,6 +19,8 @@ Plug in the tablet (developer mode, `remarkable` ssh alias pointing at
 ./run bench        # time read/hash/encode on the tablet
 ./run put a.pdf https://…/b.pdf   # upload PDFs/EPUBs, local files or URLs
 ./run put --replace https://…/b.pdf   # replace the same-named document instead of adding a copy
+./run put --folder Drafts https://…/b.pdf             # into a folder (created if missing; A/B nests)
+./run put --replace --folder "CSE 11" https://…/b.pdf # one true copy within that folder
 ./run ls                          # list documents on the tablet, newest first
 ./run get week3-friday --last     # download as PDFs with ink, into the current dir
 ./run get -o ~/Desktop Notebook   # -o picks the directory
@@ -31,10 +33,15 @@ actually running; toggling it off and on with the cable plugged in starts
 it. `./run put` checks first and says so.
 
 Plain `put` always adds a new document, duplicates included.
-`put --replace` (PDFs only) leaves exactly one document with that name, in
-the old one's folder. The web interface can't delete or replace, so this
-edits xochitl's files over ssh with xochitl stopped and restarts it (6–9 s;
-the web interface and the streamer come back on their own):
+`--folder` uploads into a folder: an existing one directly (the upload goes
+to the folder last browsed via `GET /documents/<id>`), a missing one by
+creating it.
+`put --replace` (PDFs only) leaves exactly one document with that name,
+looking only inside `--folder` if given (so same-named drafts elsewhere
+don't interfere), otherwise anywhere. The web interface can't create
+folders, delete, or replace, so those edit xochitl's files over ssh with
+xochitl stopped and restart it, once per `put` (6–9 s; the web interface
+and the streamer come back on their own):
 
 - old copy has no ink: upload the new one, delete the old, move the new
   one into the old one's folder;
@@ -145,6 +152,6 @@ accept viewer timings at `POST /clientstats` (→ `/tmp/rmlive-client.jsonl`).
 - `src/index.html`: the viewer, embedded in the binary via `include_str!`
 - `run`: launcher
 - `tools/analyze_prof.py`: profile summary
-- `tools/rmdocs.py`: `./run ls` / `./run get`
+- `tools/rmdocs.py`: `./run put` / `ls` / `get`
 - `.cargo/config.toml`: cross-compiles to static `aarch64-unknown-linux-musl`
   with `rust-lld`
