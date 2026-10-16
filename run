@@ -8,7 +8,8 @@
 #   ./run log                              tail the tablet-side log
 #   ./run prof                             pull profiling logs and summarize them
 #   ./run bench                            deploy and time read/hash/encode on the tablet
-#   ./run put FILE.pdf|URL ...             upload PDFs/EPUBs (local or URL) to the tablet
+#   ./run put [--replace] FILE.pdf|URL ... upload PDFs/EPUBs (local or URL) to the tablet;
+#                                          --replace swaps out the same-named doc (restarts xochitl)
 #   ./run ls                               list documents on the tablet, newest first
 #   ./run get [-o DIR] NAME|ID|--last ...  download documents as PDFs, ink included
 set -euo pipefail
@@ -109,7 +110,9 @@ case "$cmd" in
     ssh_rm "$REMOTE --bench"
     ;;
   put)
-    [[ $# -gt 0 ]] || { echo "usage: ./run put FILE.pdf|URL ..." >&2; exit 1; }
+    replace=
+    [[ ${1:-} == --replace ]] && { replace=1; shift; }
+    [[ $# -gt 0 ]] || { echo "usage: ./run put [--replace] FILE.pdf|URL ..." >&2; exit 1; }
     check_web
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
@@ -118,18 +121,24 @@ case "$cmd" in
       [[ $src == /* || $src == http://* || $src == https://* ]] || f="$CALLER_PWD/$src"
       if [[ $src == http://* || $src == https://* ]]; then
         f="$tmp/$(basename "${src%%\?*}")"
-        curl -sSfL -m 60 -o "$f" "$src" || { echo "download failed: $src" >&2; continue; }
+        curl -sSfL -m 60 -o "$f" "$src" || { echo "download failed: $src" >&2; failed=1; continue; }
       fi
       case "$f" in
         *.pdf) type=application/pdf ;;
         *.epub) type=application/epub+zip ;;
         *) echo "skipping $src: only .pdf and .epub" >&2; continue ;;
       esac
+      if [[ -n $replace ]]; then
+        [[ $type == application/pdf ]] || { echo "skipping $src: --replace is PDF-only" >&2; continue; }
+        python3 -I tools/rmdocs.py replace "$f" || { echo "FAILED: $src" >&2; failed=1; }
+        continue
+      fi
       code=$(curl -s -m 60 -o /dev/null -w '%{http_code}' \
         -H "Origin: $WEB" -H "Referer: $WEB/" \
         -F "file=@$f;type=$type" "$WEB/upload")
-      if [[ $code == 201 ]]; then echo "uploaded: $(basename "$f")"; else echo "FAILED ($code): $src" >&2; fi
+      if [[ $code == 201 ]]; then echo "uploaded: $(basename "$f")"; else echo "FAILED ($code): $src" >&2; failed=1; fi
     done
+    [[ -z ${failed:-} ]]
     ;;
   ls)
     check_web
@@ -140,7 +149,7 @@ case "$cmd" in
     (cd "$CALLER_PWD" && python3 -I "$REPO/tools/rmdocs.py" get "$@")
     ;;
   *)
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

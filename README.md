@@ -18,6 +18,7 @@ Plug in the tablet (developer mode, `remarkable` ssh alias pointing at
 ./run prof         # pull profiling logs and print a summary
 ./run bench        # time read/hash/encode on the tablet
 ./run put a.pdf https://…/b.pdf   # upload PDFs/EPUBs, local files or URLs
+./run put --replace https://…/b.pdf   # replace the same-named document instead of adding a copy
 ./run ls                          # list documents on the tablet, newest first
 ./run get week3-friday --last     # download as PDFs with ink, into the current dir
 ./run get -o ~/Desktop Notebook   # -o picks the directory
@@ -28,6 +29,22 @@ same import path as the web page, so documents land in the top level with
 proper metadata). The setting can read "on" while the server isn't
 actually running; toggling it off and on with the cable plugged in starts
 it. `./run put` checks first and says so.
+
+Plain `put` always adds a new document, duplicates included.
+`put --replace` (PDFs only) leaves exactly one document with that name, in
+the old one's folder. The web interface can't delete or replace, so this
+edits xochitl's files over ssh with xochitl stopped and restarts it (6–9 s;
+the web interface and the streamer come back on their own):
+
+- old copy has no ink: upload the new one, delete the old, move the new
+  one into the old one's folder;
+- old copy has ink and the same page count: swap the PDF under it, keeping
+  the document, its ink, and inserted pages;
+- old copy has ink and a different page count: refuse (ink would land on
+  the wrong pages); nothing changes;
+- several documents with that name: refuse and list them.
+
+The page count comes from poppler's `pdfinfo` (`brew install poppler`).
 
 `./run get` uses the same interface (`GET /download/<id>/pdf`, what the
 web page's download button does): notebooks and marked-up PDFs come back

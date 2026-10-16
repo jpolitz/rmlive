@@ -13,9 +13,10 @@ Give Joe a short usage reminder before anything else:
 - Viewer: http://10.11.99.1:8099/. F fullscreen, H hide panel; presets,
   per-ink color pickers, rotate, crop.
 - It doesn't survive a tablet reboot; `./run` again.
-- `./run put FILE.pdf|URL ...` uploads PDFs/EPUBs (e.g. worksheets straight
+- `./run put [--replace] FILE.pdf|URL ...` uploads PDFs/EPUBs (e.g. worksheets straight
   from the course site). Needs the USB web interface server up; if it
-  isn't, Joe toggles the setting off/on with the cable in.
+  isn't, Joe toggles the setting off/on with the cable in. `--replace`
+  swaps out the same-named document instead of adding a duplicate.
 - `./run ls` lists documents; `./run get NAME|ID|--last ...` downloads them
   as PDFs with ink into the current directory (`-o DIR` elsewhere).
 
@@ -28,6 +29,8 @@ it brief and let Joe drive.
   hide the post-quantum key-exchange warning.
 - "No route to host" while the link is up = macOS Local Network permission
   for the terminal app, not a tablet problem. Tell Joe; you can't fix it.
+  The permission is per program: Homebrew's python3 got blocked while curl
+  and `/usr/bin/python3` worked, so tools do HTTP through curl.
 - The tablet userland is BusyBox: no `timeout`, no `head -c`/`head -2`
   (use `head -n`), `ps` takes no options, awk has no `strtonum`. Parse
   binary dumps on the Mac instead.
@@ -35,12 +38,22 @@ it brief and let Joe drive.
 - The tablet's clock is wrong; don't trust its dates.
 - **Read-only toward xochitl.** Never write to `/proc/<pid>/mem`, never
   grab input devices (EVIOCGRAB), don't restart xochitl or reboot without
-  asking. Joe uses this live in lectures.
+  asking. Joe uses this live in lectures. The one sanctioned exception is
+  `put --replace` (Joe chose it, Oct 2026): it edits the data dir
+  (`~/.local/share/remarkable/xochitl`) with xochitl stopped, then starts
+  it. Back up a document's files before experimenting on it.
+- Document format: `<id>.metadata` (name, `parent` folder, type),
+  `<id>.content` (page list: formatVersion 1 has `pages` +
+  `originalPageCount`, fresh uploads use it; 2 has `cPages` with
+  `original`), `<id>.pdf`, `<id>/<page-id>.rm` ink, `<id>.thumbnails/`.
+  Folders are `CollectionType` documents; tags live in `.content` `tags`.
+  No cloud sync is configured on this tablet.
 - Root filesystem is ~89% full; binaries and files go in `/home/root`.
 - USB web interface: `xochitl.conf` can say `WebInterfaceEnabled=true`
   while nothing listens on port 80 (seen Oct 2026, fw 3.23). Toggling the
-  setting starts the server. Whether it persists across replug/reboot is
-  unknown; note it here when observed. (`127.0.0.1:8787` is memfaultd,
+  setting starts the server. It does come back by itself after an xochitl
+  restart. Whether it persists across replug/reboot is unknown; note it
+  here when observed. (`127.0.0.1:8787` is memfaultd,
   unrelated.)
 - Prefer `./run put` (the upload endpoint) over copying files into
   xochitl's data dir over ssh: that needs hand-made metadata and an
