@@ -18,6 +18,9 @@ Plug in the tablet (developer mode, `remarkable` ssh alias pointing at
 ./run prof         # pull profiling logs and print a summary
 ./run bench        # time read/hash/encode on the tablet
 ./run put a.pdf https://…/b.pdf   # upload PDFs/EPUBs, local files or URLs
+./run ls                          # list documents on the tablet, newest first
+./run get week3-friday --last     # download as PDFs with ink, into the current dir
+./run get -o ~/Desktop Notebook   # -o picks the directory
 ```
 
 `./run put` uses the tablet's USB web interface (`POST /upload`, the
@@ -25,6 +28,15 @@ same import path as the web page, so documents land in the top level with
 proper metadata). The setting can read "on" while the server isn't
 actually running; toggling it off and on with the cable plugged in starts
 it. `./run put` checks first and says so.
+
+`./run get` uses the same interface (`GET /download/<id>/pdf`, what the
+web page's download button does): notebooks and marked-up PDFs come back
+as vector PDFs with the ink, including inserted pages, in the tablet's stock
+ink colors. A name matches exactly (case-insensitive, `.pdf` optional) if
+anything does, otherwise as a substring, and every match is downloaded;
+duplicate names get an ID suffix. Folders are searched too. `--last` is
+the most recently modified document. The tablet's clock is off, so the dates
+in `./run ls` are good for ordering only.
 
 `./run [--prof] [interval_ms]` passes its arguments to the binary. The
 default poll interval is 33 ms. The streamer doesn't survive a tablet
@@ -116,5 +128,6 @@ accept viewer timings at `POST /clientstats` (→ `/tmp/rmlive-client.jsonl`).
 - `src/index.html`: the viewer, embedded in the binary via `include_str!`
 - `run`: launcher
 - `tools/analyze_prof.py`: profile summary
+- `tools/rmdocs.py`: `./run ls` / `./run get`
 - `.cargo/config.toml`: cross-compiles to static `aarch64-unknown-linux-musl`
   with `rust-lld`

@@ -16,6 +16,8 @@ Give Joe a short usage reminder before anything else:
 - `./run put FILE.pdf|URL ...` uploads PDFs/EPUBs (e.g. worksheets straight
   from the course site). Needs the USB web interface server up; if it
   isn't, Joe toggles the setting off/on with the cable in.
+- `./run ls` lists documents; `./run get NAME|ID|--last ...` downloads them
+  as PDFs with ink into the current directory (`-o DIR` elsewhere).
 
 Then check whether the tablet is reachable (`./run status`) and say so. Keep
 it brief and let Joe drive.
@@ -67,5 +69,8 @@ byte-wise memcmp, then memory bandwidth). Budget: the streamer is capped at
   digitizer→screen coordinate mapping (axes and rotation unknown).
 - Raspberry Pi as a laptop-free HDMI box running the viewer.
 - Reading only around the pen while drawing, to cut latency further.
-- Highlighters / other pen colors haven't been seen yet; semi-transparent
-  strokes may need different recolor math.
+- Highlighters / other pen colors haven't been seen live yet; semi-transparent
+  strokes may need different recolor math. (A yellow highlighter shows up in
+  week3-friday's export.)
+- Recoloring exported PDFs with the projector palette: the export keeps the
+  stock ink colors.
