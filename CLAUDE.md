@@ -10,7 +10,8 @@ Give Joe a short usage reminder before anything else:
 
 - `./run` starts it (build, deploy if changed, restart, open the viewer);
   `./run --prof` with profiling; `./run stop`, `status`, `log`, `prof`, `bench`.
-- Viewer: http://10.11.99.1:8099/. F fullscreen, H hide panel; presets,
+- Viewer: the rmlive Mac app (`./run app` reopens it), or
+  http://10.11.99.1:8099/ in a browser. F fullscreen, H hide panel; presets,
   per-ink color pickers, rotate, crop.
 - It doesn't survive a tablet reboot; `./run` again.
 - `./run put [--replace] [--folder F] FILE.pdf|URL ...` uploads PDFs/EPUBs (e.g. worksheets straight
@@ -71,6 +72,9 @@ it brief and let Joe drive.
   server is hand-rolled on std; keep it that way unless there's a real need.
 - `index.html` is embedded with `include_str!`, so page changes need a
   rebuild + `./run`, and the browser tab needs a reload.
+- The Mac viewer app is Swift (`mac/`), the one non-Rust part: a thin
+  WKWebView shell. Native features go in as message types on the
+  `rmlive` script handler, with the page falling back to web APIs.
 
 ## Performance work
 

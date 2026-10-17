@@ -282,7 +282,10 @@ document.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => {
   for (const k of Object.keys(S.inks)) if (!(k in p.inks)) p.inks[k] = b.dataset.preset === 'original' ? k : S.inks[k];
   S.bg = p.bg; S.inks = p.inks; save(); syncPanel(); recolorAll();
 });
-const toggleFs = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+// Inside the Mac app (mac/main.swift), native calls go through this handler.
+const native = window.webkit?.messageHandlers?.rmlive;
+const toggleFs = () => native ? native.postMessage({ type: 'fullscreen' })
+  : document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
 $('fs').onclick = toggleFs;
 let idleT, forced = null;
 function wake() { if (forced === 'hidden') return; document.body.classList.remove('idle'); clearTimeout(idleT);

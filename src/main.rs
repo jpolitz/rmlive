@@ -523,7 +523,7 @@ fn stream_to(out: &mut TcpStream, hub: &Arc<Mutex<Hub>>) -> io::Result<()> {
         drop(frame);
         let enc_t = t.elapsed();
         let t = Instant::now();
-        if let Err(e) = parts.iter().try_for_each(|(bytes, _)| out.write_all(bytes)) {
+        if let Err(e) = parts.iter().try_for_each(|(bytes, _)| write_chunk(out, bytes)) {
             break Err(e);
         }
         prof(format!(
@@ -537,6 +537,17 @@ fn stream_to(out: &mut TcpStream, hub: &Arc<Mutex<Hub>>) -> io::Result<()> {
     };
     viewer.state.lock().unwrap().closed = true;
     result
+}
+
+/// One HTTP chunk. WebKit holds back the tail of a read-until-close body
+/// until more bytes arrive (a keyframe stalled at ~49 KB until the next
+/// stroke); explicit chunk boundaries get each message delivered whole.
+fn write_chunk(out: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(bytes.len() + 16);
+    write!(buf, "{:x}\r\n", bytes.len())?;
+    buf.extend_from_slice(bytes);
+    buf.extend_from_slice(b"\r\n");
+    out.write_all(&buf)
 }
 
 fn handle(stream: TcpStream, hub: Arc<Mutex<Hub>>) -> io::Result<()> {
@@ -573,7 +584,7 @@ fn handle(stream: TcpStream, hub: Arc<Mutex<Hub>>) -> io::Result<()> {
             out.set_nodelay(true)?;
             out.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
-                  Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+                  Transfer-Encoding: chunked\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
             )?;
             stream_to(&mut out, &hub)
         }

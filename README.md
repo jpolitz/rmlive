@@ -95,6 +95,15 @@ reboot; `./run` again.
   mouse is still. Settings persist in the browser's localStorage.
 - Bottom-left status shows KB/s and updates/s.
 
+`./run` opens the viewer in a small Mac app (`mac/main.swift`, a window
+around a WKWebView, built with `swiftc` into `target/rmlive.app`). `./run
+app` opens just the app; `RMLIVE_BROWSER=1 ./run` uses the default browser
+instead. The app keeps its own localStorage, so presets saved in a browser
+don't carry over. The page reaches native code through
+`window.webkit.messageHandlers.rmlive` (fullscreen so far); in a browser
+that's absent and it uses web APIs. macOS asks for Local Network permission
+on the app's first launch, and again after a rebuild.
+
 ## How it works
 
 **Finding the screen.** xochitl (the reMarkable UI) renders the page into a

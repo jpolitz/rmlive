@@ -3,6 +3,7 @@
 # `remarkable` ssh alias (override with RM_HOST).
 #
 #   ./run [start] [--prof] [interval_ms]   build, deploy if changed, (re)start, open viewer
+#   ./run app                              build and open just the viewer app (RMLIVE_BROWSER=1: use the browser)
 #   ./run stop                             stop the streamer on the tablet
 #   ./run status                           running? which frame? last log lines
 #   ./run log                              tail the tablet-side log
@@ -61,6 +62,28 @@ build_and_deploy() {
   fi
 }
 
+# The viewer app (mac/). Rebuilt only when its sources change, since every
+# ad-hoc-signed build is a new identity to macOS's Local Network prompt.
+APP=target/rmlive.app
+build_app() {
+  local exe=$APP/Contents/MacOS/rmlive
+  if [[ ! -x $exe || mac/main.swift -nt $exe || mac/Info.plist -nt $exe ]]; then
+    echo "building $APP"
+    mkdir -p "$APP/Contents/MacOS"
+    cp mac/Info.plist "$APP/Contents/"
+    swiftc -O -o "$exe" mac/main.swift
+    codesign --force --sign - "$APP" 2>/dev/null
+  fi
+}
+
+open_viewer() {
+  if [[ -n ${RMLIVE_BROWSER:-} ]] || ! build_app; then
+    open "$URL"
+  else
+    open "$APP"
+  fi
+}
+
 cmd=${1:-start}
 [[ $# -gt 0 ]] && shift
 
@@ -80,7 +103,10 @@ case "$cmd" in
       exit 1
     fi
     ssh_rm 'cat /tmp/rmlive.log'
-    open "$URL"
+    open_viewer
+    ;;
+  app)
+    open_viewer
     ;;
   stop)
     check_tablet
