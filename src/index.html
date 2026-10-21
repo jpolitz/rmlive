@@ -45,6 +45,8 @@
   <h2>Inks</h2>
   <div id="inks"></div>
   <div class="row"><button id="detect">Detect inks on page</button></div>
+  <div class="row"><button id="pcopy">Copy palette</button><button id="papply">Apply palette</button></div>
+  <textarea id="ptext" rows="3" spellcheck="false" style="width:100%;resize:vertical;font:10px/1.3 monospace" placeholder="palette JSON — paste here, then Apply palette"></textarea>
   <h2>View</h2>
   <div class="row">Rotate <select id="rot"><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select>
     <button id="fs" style="margin-left:auto">Fullscreen</button></div>
@@ -276,6 +278,33 @@ $('bg').oninput = e => { S.bg = e.target.value; save(); recolorAll(); };
 $('rot').onchange = e => { S.rot = +e.target.value; save(); schedule(); };
 ['cl', 'cr', 'ct', 'cb'].forEach((id, i) => $(id).oninput = e => { S.crop[i] = Math.max(0, +e.target.value || 0); save(); schedule(); });
 $('detect').onclick = () => detectInks(true);
+
+// ---------- palette copy/paste ----------
+// The page is plain http, so the async Clipboard API is unavailable; Copy uses
+// execCommand from the click, with the textarea as the always-works fallback
+// (select + ⌘C). Apply merges: pasted keys win, other inks stay.
+const paletteJson = () => JSON.stringify({ v: 1, bg: S.bg, inks: S.inks });
+function applyPalette(text) {
+  let p;
+  try { p = JSON.parse(text); } catch { status.textContent = 'palette: not valid JSON'; return; }
+  if (!p || typeof p.inks !== 'object' || !p.inks) { status.textContent = 'palette: no inks object'; return; }
+  const hex = s => /^#[0-9a-f]{6}$/i.test(s);
+  if (typeof p.bg === 'string' && hex(p.bg)) S.bg = p.bg;
+  let n = 0;
+  for (const [k, v] of Object.entries(p.inks))
+    if (hex(k) && hex(v)) { S.inks[k.toLowerCase()] = v.toLowerCase(); n++; }
+  save(); syncPanel(); recolorAll();
+  status.textContent = `palette applied: ${n} ink(s)`;
+}
+$('pcopy').onclick = () => {
+  const text = paletteJson();
+  $('ptext').value = text;
+  $('ptext').select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  status.textContent = ok ? 'palette copied' : 'palette selected — copy it (⌘C)';
+};
+$('papply').onclick = () => applyPalette($('ptext').value);
 document.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => {
   const p = structuredClone(PRESETS[b.dataset.preset]);
   // keep any extra detected inks, mapped to themselves

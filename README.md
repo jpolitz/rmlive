@@ -41,6 +41,8 @@ Plug in the tablet (developer mode, `remarkable` ssh alias pointing at
 ./run ls                          # list documents on the tablet, newest first
 ./run get week3-friday --last     # download as PDFs with ink, into the current dir
 ./run get -o ~/Desktop Notebook   # -o picks the directory
+./run get --palette projector regions.pdf   # ink remapped to the Projector palette
+./run get --palette my.json regions.pdf     # palette = viewer "Copy palette" JSON (file or inline)
 ```
 
 `./run put` uses the tablet's USB web interface (`POST /upload`, the
@@ -73,7 +75,10 @@ The page count comes from poppler's `pdfinfo` (`brew install poppler`).
 `./run get` uses the same interface (`GET /download/<id>/pdf`, what the
 web page's download button does): notebooks and marked-up PDFs come back
 as vector PDFs with the ink, including inserted pages, in the tablet's stock
-ink colors. A name matches exactly (case-insensitive, `.pdf` optional) if
+ink colors. `--palette` rewrites the ink stroke colors: 'projector' (the
+viewer's preset) or a palette from the viewer's Copy palette button (file or
+inline JSON) — stock green/blue/yellow/red → your chosen colors; black and
+unrecognized pens pass through; the printed page's own colors are untouched. A name matches exactly (case-insensitive, `.pdf` optional) if
 anything does, otherwise as a substring, and every match is downloaded;
 duplicate names get an ID suffix. Folders are searched too. `--last` is
 the most recently modified document. The tablet's clock is off, so the dates
@@ -107,7 +112,9 @@ on the app's first launch, and again after a rebuild.
 ## How it works
 
 **Finding the screen.** xochitl (the reMarkable UI) renders the page into a
-malloc'd RGBA buffer: 1632-pixel rows (1620 visible + 12 padding), 2160
+malloc'd BGRA buffer (byte order B,G,R,A; native-endian ARGB on the
+little-endian ARM — an RGBA reading swaps red and blue, leaves
+green/black unchanged): 1632-pixel rows (1620 visible + 12 padding), 2160
 rows, upright, full color. It sits on a page boundary with a 16-byte glibc
 chunk header whose size field is `0xD73000 | flags`. A second, same-sized
 allocation holds the gray e-ink buffer (1 level byte + 3 unused per pixel,

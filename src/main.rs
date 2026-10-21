@@ -1,9 +1,12 @@
 //! rmlive: stream the reMarkable Paper Pro's screen to a browser.
 //!
-//! xochitl keeps its rendered page as a malloc'd RGBA buffer
-//! (1632-px row stride, 1620 visible, 2160 rows). We find it in
-//! /proc/<pid>/mem, poll it, and ship changed 64x64 tiles to viewers
-//! as deflate-compressed RGB over a long-lived HTTP response.
+//! xochitl keeps its rendered page as a malloc'd BGRA buffer
+//! (1632-px row stride, 1620 visible, 2160 rows; byte order B,G,R,A —
+//! native-endian ARGB on this little-endian ARM. Verified Oct 2026 by
+//! matching printed syntax-highlighting colors against the source PDF;
+//! an RGBA reading swaps red and blue and leaves green/black unchanged).
+//! We find it in /proc/<pid>/mem, poll it, and ship changed 64x64 tiles
+//! to viewers as deflate-compressed RGB over a long-lived HTTP response.
 //!
 //! Viewers don't get a queue of diffs. Each one has a set of tiles that
 //! changed since its last send plus the newest frame; its connection
@@ -460,7 +463,8 @@ fn encode(frame: &[u8], tiles: &[Rect], seq: u32) -> (Vec<u8>, usize) {
         for row in y..y + h {
             let o = (row * STRIDE + x) * 4;
             for px in frame[o..o + w * 4].chunks_exact(4) {
-                raw.extend_from_slice(&px[..3]);
+                // buffer is BGRA; the wire format is RGB
+                raw.extend_from_slice(&[px[2], px[1], px[0]]);
             }
         }
     }

@@ -1,11 +1,14 @@
 """Documents on the tablet via the USB web interface. Called by `./run`.
 
   rmdocs.py ls
-  rmdocs.py get [-o DIR] (NAME | ID | --last) ...
+  rmdocs.py get [-o DIR] [--palette projector|FILE] (NAME | ID | --last) ...
   rmdocs.py put [--replace] [--folder PATH] FILE ...
 
 get: NAME matches exactly (case-insensitive, ".pdf" optional) if anything
 does, otherwise as a substring; every match is downloaded as a PDF with ink.
+--palette remaps ink colors: 'projector' (the viewer's preset) or a palette
+file/JSON from the viewer's Copy palette button.
+--palette projector remaps stock ink colors to the viewer's Projector preset.
 
 put: uploads PDFs/EPUBs. --folder puts them in PATH ("A/B" nests), creating
 folders as needed. --replace makes FILE the one document with that name (in
@@ -16,11 +19,13 @@ those edit xochitl's files over ssh with xochitl stopped: one restart per run.
 """
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 import time
 import uuid
+import zlib
 
 WEB = "http://10.11.99.1"
 HOST = os.environ.get("RM_HOST", "remarkable")
@@ -28,6 +33,90 @@ DATA = "/home/root/.local/share/remarkable/xochitl"
 
 # Shell commands to run in DATA with xochitl stopped, all in one restart.
 EDITS = []
+
+# Exported PDFs draw ink as stroke-color ops (RG) in the stock pen colors,
+# float32-rounded c/255 and sometimes without a leading zero. The viewer's
+# stock pen keys (src/index.html PRESETS) map to those export colors. Black is
+# deliberately absent: printed black strokes are indistinguishable from black
+# ink, so black mappings are never applied (a dark-palette export would need
+# ink-layer-only rewriting). Only RG ops matching a stock color exactly (within
+# float32 slop) are rewritten: the printed page rides along as a form XObject
+# with its own colors and passes through. The highlighter exports as opaque
+# strokes under the page, so the same substitution covers it.
+VIEWER_STOCK = {
+    "#00ff00": (145 / 255, 218 / 255, 113 / 255),   # green
+    "#0000ff": (48 / 255, 74 / 255, 224 / 255),     # blue
+    "#ffff00": (250 / 255, 231 / 255, 25 / 255),    # yellow (also the highlighter)
+    "#ff0000": (194 / 255, 49 / 255, 50 / 255),     # red
+    # purple (.753 .498 .824) seen once; no stock pure-primary key known yet
+}
+
+# The viewer's Projector preset (src/index.html PRESETS.projector). bg is not
+# used for exports: the printed page is the background.
+PROJECTOR = {"#000000": "#000000", "#00ff00": "#1a7f37", "#ffff00": "#b35c00", "#0000ff": "#1f4fd1"}
+
+
+def palette_table(inks):
+    """Stock export color -> target RGB floats, from a viewer palette {stockKey: chosenHex}.
+    Unmapped pens and unknown keys are skipped (they pass through stock)."""
+    table = {}
+    for k, v in inks.items():
+        k, v = str(k).lower(), str(v).lower()
+        if k in VIEWER_STOCK and v != k:
+            m = re.fullmatch(r"#?([0-9a-f]{6})", v)
+            if m:
+                n = int(m.group(1), 16)
+                table[VIEWER_STOCK[k]] = ((n >> 16) / 255, (n >> 8 & 255) / 255, (n & 255) / 255)
+    return table
+
+
+INK_OP = re.compile(rb"(\.?\d+\.?\d*) (\.?\d+\.?\d*) (\.?\d+\.?\d*) RG")
+INK_STREAM = re.compile(rb"<<[^<>]*/Filter ?/FlateDecode[^<>]*/Length (\d+)[^<>]*>>\s*stream\r?\n")
+
+
+def recolor_pdf(path, table):
+    """Remap stock ink colors in an exported PDF per `table` (see palette_table),
+    in place. Returns the number of stroke ops rewritten."""
+    def remap(m):
+        rgb = tuple(float(g) for g in m.groups())
+        for src, dst in table.items():
+            if max(abs(a - b) for a, b in zip(rgb, src)) <= 0.001:
+                hits[0] += 1
+                return b"%.6f %.6f %.6f RG" % dst
+        return m.group(0)
+
+    hits = [0]
+
+    with open(path, "rb") as f:
+        data = f.read()
+    out = bytearray()
+    pos = 0
+    n = 0
+    for m in INK_STREAM.finditer(data):
+        length = int(m.group(1))
+        start, data_start = m.start(), m.end()
+        data_end = data_start + length
+        if data_end > len(data):
+            continue
+        try:
+            content = zlib.decompress(data[data_start:data_end])
+        except zlib.error:
+            continue
+        new_content = INK_OP.sub(remap, content)
+        if hits[0] > n:
+            new_data = zlib.compress(new_content, 9)
+            # data[start:data_start] is the dict plus the "stream\r\n" separator;
+            # update /Length inside it, keep the separator verbatim.
+            new_dict = re.sub(rb"/Length \d+", b"/Length %d" % len(new_data), data[start:data_start])
+            out += data[pos:start]
+            out += new_dict + new_data
+            pos = data_end  # the \r\n before endstream and beyond stay verbatim
+        n = hits[0]
+    if pos:
+        out += data[pos:]
+        with open(path, "wb") as f:
+            f.write(out)
+    return n
 
 
 # HTTP goes through curl rather than urllib: macOS grants Local Network access
@@ -260,8 +349,28 @@ def main(argv):
         i = args.index("-o")
         out = args[i + 1]
         del args[i:i + 2]
+    palette = None
+    if "--palette" in args:
+        i = args.index("--palette")
+        if i + 1 >= len(args):
+            sys.exit("--palette needs 'projector' or a palette file/JSON (viewer: Copy palette)")
+        src = args[i + 1]
+        del args[i:i + 2]
+        if src == "projector":
+            table = palette_table(PROJECTOR)
+        else:
+            try:
+                p = json.loads(src) if src.lstrip().startswith("{") else json.load(open(src))
+            except (OSError, ValueError) as e:
+                sys.exit(f"palette {src!r}: {e}")
+            if not isinstance(p, dict) or not isinstance(p.get("inks"), dict):
+                sys.exit(f"palette {src!r}: expected the viewer's Copy palette JSON ({{bg, inks}})")
+            table = palette_table(p["inks"])
+        if not table:
+            sys.exit(f"palette {src!r}: no mappable ink (green/blue/yellow/red are the pens exports can recolor)")
+        palette = table
     if not args:
-        sys.exit("usage: ./run get [-o DIR] NAME|ID|--last ...")
+        sys.exit("usage: ./run get [-o DIR] [--palette projector|FILE] NAME|ID|--last ...")
     os.makedirs(out, exist_ok=True)
     failed = False
     for wanted in args:
@@ -284,7 +393,14 @@ def main(argv):
                 continue
             with open(dest, "wb") as f:
                 f.write(data)
-            print(f"{path} -> {dest} ({len(data) // 1024} KB)")
+            note = ""
+            if palette:
+                try:
+                    k = recolor_pdf(dest, palette)
+                    note = f", ink remapped ({k} stroke ops)"
+                except Exception as e:
+                    note = f", ink remap FAILED ({e}); stock colors kept"
+            print(f"{path} -> {dest} ({len(data) // 1024} KB{note})")
     sys.exit(1 if failed else 0)
 
 

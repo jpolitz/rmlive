@@ -91,7 +91,21 @@ byte-wise memcmp, then memory bandwidth). Budget: the streamer is capped at
 - Raspberry Pi as a laptop-free HDMI box running the viewer.
 - Reading only around the pen while drawing, to cut latency further.
 - Highlighters / other pen colors haven't been seen live yet; semi-transparent
-  strokes may need different recolor math. (A yellow highlighter shows up in
-  week3-friday's export.)
-- Recoloring exported PDFs with the projector palette: the export keeps the
-  stock ink colors.
+  strokes may need different recolor math. (The yellow highlighter exports as
+  opaque strokes under the printed page — plain color substitution covers it.)
+- Recoloring exported PDFs: done via `get --palette` (Oct 2026) — 'projector'
+  or a viewer palette (the page's Copy palette button emits {v, bg, inks};
+  Apply merges it into the viewer's settings; rmdocs maps the four stock pen
+  primaries through it, black never rewritten). Open: a dark-palette export
+  (light ink on a dark background rect).
+- Exported PDF structure (verified Oct 2026): per page, /Contents is an array
+  [printed-form, ink-stream]; ink is RG stroke ops + rg fills in stock pen
+  colors — float32 c/255, sometimes without a leading zero. Stock palette seen:
+  green (.56862748 .85490197 .44313726), blue (.1882353 .29019609 .87843138),
+  yellow (.98039216 .90588235 .09803922), red (.76 .192 .196), purple
+  (.753 .498 .824). Highlighter = same RG ops, opaque, under the printed form.
+- Oct 20 2026: tablet hard-rebooted mid-session (sleep/wake + first USB attach
+  to a new laptop; USB NIC vanished from the Mac; no pstore). xochitl crash
+  recovery said "regions.pdf closed unexpectedly" and re-serialized the open
+  page's .rm on reopen — no ink lost; pre/post-crash exports identical modulo
+  user edits. If it recurs around deploys, bisect with the old binary.
