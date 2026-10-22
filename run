@@ -174,7 +174,7 @@ case "$cmd" in
     (cd "$CALLER_PWD" && python3 -I "$REPO/tools/rmdocs.py" get "$@")
     ;;
   *)
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac
