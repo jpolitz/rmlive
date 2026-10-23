@@ -2,9 +2,11 @@
 # rmlive launcher. Run from anywhere; talks to the tablet over USB via the
 # `remarkable` ssh alias (override with RM_HOST).
 #
-#   ./run [start] [--prof] [interval_ms]   build, deploy if changed, (re)start, open viewer
+#   ./run [start] [--prof] [interval_ms] [--sync F [-o DIR]]
+#                                          build, deploy if changed, (re)start, open viewer;
+#                                          --sync also starts ./run sync F
 #   ./run app                              build and open just the viewer app (RMLIVE_BROWSER=1: use the browser)
-#   ./run stop                             stop the streamer on the tablet
+#   ./run stop                             stop the streamer on the tablet, and sync
 #   ./run status                           running? which frame? last log lines
 #   ./run log                              tail the tablet-side log
 #   ./run prof                             pull profiling logs and summarize them
@@ -15,6 +17,10 @@
 #   ./run ls                               list documents on the tablet, newest first
 #   ./run get [-o DIR] [--palette projector|FILE] NAME|ID|--last ...
 #                                          download documents as PDFs, ink included
+#   ./run sync [-o DIR] [--palette projector|FILE] FOLDER ...
+#                                          in the background, keep PDFs of FOLDER's documents
+#                                          current in DIR/FOLDER/ (default: current dir)
+#   ./run sync [stop]                      sync running? recent log / stop it
 set -euo pipefail
 CALLER_PWD=$PWD
 cd "$(dirname "$0")"
@@ -86,6 +92,49 @@ build_app() {
   fi
 }
 
+# Background sync on the Mac (tools/rmdocs.py sync); it outlives the cable
+# and picks up again when the tablet comes back.
+SYNC_PID=target/sync.pid
+SYNC_LOG=target/sync.log
+sync_pid() {
+  local p
+  p=$(cat "$SYNC_PID" 2>/dev/null) && ps -p "$p" -o command= 2>/dev/null | grep -q 'rmdocs.py sync' && echo "$p"
+}
+sync_stop() {
+  local p
+  p=$(sync_pid) || return 0
+  kill "$p"
+  # It exports anything pending before exiting; unplugged, that fails fast.
+  for _ in $(seq 1 120); do kill -0 "$p" 2>/dev/null || break; sleep 0.5; done
+  kill -0 "$p" 2>/dev/null && kill -9 "$p"
+  echo "sync stopped"
+}
+sync_start() {
+  (cd "$CALLER_PWD" && python3 -I "$REPO/tools/rmdocs.py" sync --check "$@") || return 1
+  sync_stop >/dev/null
+  mkdir -p target
+  rm -f "$SYNC_PID"
+  # All of the subshell's fds go to the log, so nothing holds the caller's
+  # terminal or pipe open.
+  (cd "$CALLER_PWD" && RMLIVE_SYNC_PIDFILE="$REPO/$SYNC_PID" \
+     exec nohup python3 -I -u "$REPO/tools/rmdocs.py" sync "$@") </dev/null >>"$SYNC_LOG" 2>&1 &
+  for _ in $(seq 1 20); do sync_pid >/dev/null && break; sleep 0.25; done
+  if ! sync_pid >/dev/null; then
+    echo "sync didn't start:" >&2
+    tail -n 3 "$SYNC_LOG" >&2
+    return 1
+  fi
+  grep 'syncing' "$SYNC_LOG" | tail -n 1 | cut -d' ' -f2-
+}
+sync_status() {
+  local p
+  if p=$(sync_pid); then
+    echo "sync: running: $(ps -p "$p" -o command= | sed 's/.*rmdocs.py sync //')"
+  else
+    echo "sync: not running"
+  fi
+}
+
 open_viewer() {
   if [[ -n ${RMLIVE_BROWSER:-} ]] || ! build_app; then
     open "$URL"
@@ -94,15 +143,26 @@ open_viewer() {
   fi
 }
 
-cmd=${1:-start}
-[[ $# -gt 0 ]] && shift
+# Bare flags or an interval (./run --prof, ./run --sync F) mean start.
+case "${1:-}" in
+  ""|-*|[0-9]*) cmd=start ;;
+  *) cmd=$1; shift ;;
+esac
 
 case "$cmd" in
   start)
+    rm_args=() sync_args=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --sync) sync_args+=("${2:?--sync needs a folder}"); shift 2 ;;
+        -o) sync_args+=(-o "${2:?-o needs a directory}"); shift 2 ;;
+        *) rm_args+=("$1"); shift ;;
+      esac
+    done
     check_tablet
     build_and_deploy
     # shellcheck disable=SC2029  # args are meant to expand locally
-    ssh_rm "killall rmlive 2>/dev/null; sleep 0.3; cd /home/root && nohup ./rmlive $* >/tmp/rmlive.log 2>&1 &"
+    ssh_rm "killall rmlive 2>/dev/null; sleep 0.3; cd /home/root && nohup ./rmlive ${rm_args[*]:-} >/tmp/rmlive.log 2>&1 &"
     for _ in $(seq 1 25); do
       curl -s -m 1 -o /dev/null "$URL" && break
       sleep 0.2
@@ -113,16 +173,19 @@ case "$cmd" in
       exit 1
     fi
     ssh_rm 'cat /tmp/rmlive.log'
+    if [[ ${#sync_args[@]} -gt 0 ]]; then sync_start "${sync_args[@]}" || true; fi
     open_viewer
     ;;
   app)
     open_viewer
     ;;
   stop)
+    sync_stop
     check_tablet
     ssh_rm 'killall rmlive 2>/dev/null && echo stopped || echo "not running"'
     ;;
   status)
+    sync_status
     check_tablet
     ssh_rm 'if pidof rmlive >/dev/null; then echo "running: $(tr "\0" " " </proc/$(pidof rmlive)/cmdline)"; else echo "not running"; fi; echo "--- /tmp/rmlive.log"; tail -n 5 /tmp/rmlive.log 2>/dev/null'
     echo "viewer: $URL"
@@ -169,12 +232,19 @@ case "$cmd" in
     check_web
     python3 -I tools/rmdocs.py ls
     ;;
+  sync)
+    case "${1:-}" in
+      "") sync_status; echo "--- $SYNC_LOG"; tail -n 10 "$SYNC_LOG" 2>/dev/null || true ;;
+      stop) sync_stop ;;
+      *) sync_start "$@" ;;
+    esac
+    ;;
   get)
     check_web
     (cd "$CALLER_PWD" && python3 -I "$REPO/tools/rmdocs.py" get "$@")
     ;;
   *)
-    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

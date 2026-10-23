@@ -3,6 +3,7 @@
   rmdocs.py ls
   rmdocs.py get [-o DIR] [--palette projector|FILE] (NAME | ID | --last) ...
   rmdocs.py put [--replace] [--folder PATH] FILE ...
+  rmdocs.py sync [-o DIR] [--palette projector|FILE] FOLDER ...
 
 get: NAME matches exactly (case-insensitive, ".pdf" optional) if anything
 does, otherwise as a substring; every match is downloaded as a PDF with ink.
@@ -16,11 +17,15 @@ folders as needed. --replace makes FILE the one document with that name (in
 into the old document instead (ink stays on its pages), which needs the same
 page count. The web interface can't create folders, move, or delete, so
 those edit xochitl's files over ssh with xochitl stopped: one restart per run.
+
+sync: runs until killed, keeping DIR/<folder path>/<name>.pdf current for every
+document under FOLDER (see the comment above sync()). Read-only on the tablet.
 """
 import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -67,6 +72,30 @@ def palette_table(inks):
             if m:
                 n = int(m.group(1), 16)
                 table[VIEWER_STOCK[k]] = ((n >> 16) / 255, (n >> 8 & 255) / 255, (n & 255) / 255)
+    return table
+
+
+def pop_palette(args):
+    """Remove `--palette SRC` from args; its color table (see palette_table), or None."""
+    if "--palette" not in args:
+        return None
+    i = args.index("--palette")
+    if i + 1 >= len(args):
+        sys.exit("--palette needs 'projector' or a palette file/JSON (viewer: Copy palette)")
+    src = args[i + 1]
+    del args[i:i + 2]
+    if src == "projector":
+        table = palette_table(PROJECTOR)
+    else:
+        try:
+            p = json.loads(src) if src.lstrip().startswith("{") else json.load(open(src))
+        except (OSError, ValueError) as e:
+            sys.exit(f"palette {src!r}: {e}")
+        if not isinstance(p, dict) or not isinstance(p.get("inks"), dict):
+            sys.exit(f"palette {src!r}: expected the viewer's Copy palette JSON ({{bg, inks}})")
+        table = palette_table(p["inks"])
+    if not table:
+        sys.exit(f"palette {src!r}: no mappable ink (green/blue/yellow/red are the pens exports can recolor)")
     return table
 
 
@@ -134,9 +163,9 @@ def fetch(path, timeout=10):
     return curl("-f", WEB + path, timeout=timeout)
 
 
-def ssh(cmd):
-    return subprocess.run(["ssh", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR", HOST, cmd],
-                          check=True, capture_output=True, text=True).stdout
+def ssh(cmd, opts=(), timeout=None):
+    return subprocess.run(["ssh", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR", *opts, HOST, cmd],
+                          check=True, capture_output=True, text=True, timeout=timeout).stdout
 
 
 def set_parent(doc_id, parent):
@@ -331,11 +360,197 @@ def select(docs, wanted):
     return exact or [pd for pd in docs if w in pd[0].lower()]
 
 
+# Sync: keep PDFs of a folder's documents current on the Mac while the cable is
+# in, so they're there after unplugging. Polls a cheap fingerprint over ssh and
+# exports a document only once it has changed and then sat untouched for
+# SYNC_IDLE seconds: exports render on the tablet's CPU, and pauses are when
+# you're likely to unplug anyway.
+SYNC_IDLE = 30
+SYNC_POLL = 5
+SYNC_STATE = ".rmlive-sync.json"
+# One ssh connection reused across polls instead of a handshake every few
+# seconds; keepalives notice a pulled cable within a few seconds.
+SYNC_SSH = ["-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/rmlive-ssh-%C",
+            "-o", "ControlPersist=60", "-o", "ServerAliveInterval=2", "-o", "ServerAliveCountMax=2"]
+
+
+def snapshot(opts=SYNC_SSH):
+    """({id: metadata fields}, {id: fingerprint}) for everything on the tablet,
+    in one ssh call. A fingerprint is the sizes and mtimes of a document's
+    files: the tablet clock is wrong, but only whether they change matters."""
+    out = ssh(f"cd {DATA} && grep -H -E '^ *\"(parent|type|visibleName|deleted)\"' *.metadata; "
+              f"echo ---; stat -c '%n %s %Y' *.metadata *.content */*.rm 2>/dev/null; true",
+              opts, timeout=30)
+    meta_part, _, stat_part = out.partition("---\n")
+    metas, fps = {}, {}
+    for line in meta_part.splitlines():
+        m = re.match(r'([^/.]+)\.metadata: *"(\w+)": *(.*?),?$', line)
+        if m:
+            metas.setdefault(m[1], {})[m[2]] = json.loads(m[3])
+    for line in sorted(stat_part.splitlines()):
+        doc = line.split("/")[0].split(".")[0]
+        fps[doc] = fps.get(doc, "") + line + "\n"
+    return metas, fps
+
+
+def tablet_paths(metas):
+    """{id: "Folder/Sub/Name"} for everything not in the trash."""
+    def path(i, depth=0):
+        m = metas.get(i)
+        if not m or m.get("deleted") or depth > 50:
+            return None
+        name = m.get("visibleName", i).replace("/", "_")
+        parent = m.get("parent", "")
+        if parent == "":
+            return name
+        up = None if parent == "trash" else path(parent, depth + 1)
+        return up and f"{up}/{name}"
+    return {i: path(i) for i in metas}
+
+
+def check_roots(roots, metas):
+    paths = tablet_paths(metas)
+    folders = {p for i, p in paths.items() if p and metas[i].get("type") == "CollectionType"}
+    missing = [r for r in roots if r not in folders]
+    if missing:
+        sys.exit(f"no folder {', '.join(map(repr, missing))} on the tablet; folders: "
+                 + ", ".join(sorted(folders)))
+
+
+def log(msg):
+    print(time.strftime("%H:%M:%S"), msg, flush=True)
+
+
+def sync(args):
+    out = "."
+    if "-o" in args:
+        i = args.index("-o")
+        out = args[i + 1]
+        del args[i:i + 2]
+    palette = pop_palette(args)
+    check_only = "--check" in args
+    if check_only:
+        args.remove("--check")
+    roots = [r.strip("/") for r in args]
+    if not roots:
+        sys.exit("usage: ./run sync [-o DIR] [--palette projector|FILE] FOLDER ...")
+    if check_only:
+        # ./run sync runs this first, so a typo doesn't replace a working sync.
+        try:
+            # Plain ssh: a shared connection started here would hold our stdout open.
+            check_roots(roots, snapshot(opts=())[0])
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            print("tablet not reachable; can't check the folder names yet")
+        return
+    if os.environ.get("RMLIVE_SYNC_PIDFILE"):
+        # ./run tracks us by this: python3 can be a launcher that hands off to another process.
+        with open(os.environ["RMLIVE_SYNC_PIDFILE"], "w") as f:
+            f.write(f"{os.getpid()}\n")
+    os.makedirs(out, exist_ok=True)
+    state_path = os.path.join(out, SYNC_STATE)
+    try:
+        with open(state_path) as f:
+            state = json.load(f)   # id -> {file, done: fingerprint exported, wrote: [size, mtime_ns]}
+    except FileNotFoundError:
+        state = {}
+
+    # SIGTERM (./run stop, ./run sync stop): export whatever is pending, then exit.
+    stopping = []
+    signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
+    seen, changed_at, retry_at, held = {}, {}, {}, {}
+    last_problem = [None]
+
+    def problem(msg):
+        if msg != last_problem[0]:
+            log(msg)
+        last_problem[0] = msg
+
+    log(f"syncing {', '.join(roots)} -> {os.path.abspath(out)}"
+        f"{' (palette)' if palette else ''}; exports after {SYNC_IDLE}s without changes")
+    checked = False
+    while True:
+        final = bool(stopping)
+        try:
+            metas, fps = snapshot()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            problem("tablet not reachable (unplugged?); waiting for it")
+            metas = None
+        if metas is not None:
+            if last_problem[0] and last_problem[0].startswith("tablet not reachable"):
+                problem("tablet is back")
+            paths = tablet_paths(metas)
+            if not checked:
+                check_roots(roots, metas)
+                checked = True
+            docs = {i: p for i, p in paths.items()
+                    if p and metas[i].get("type") == "DocumentType" and any(p.startswith(r + "/") for r in roots)}
+            now = time.monotonic()
+            for i in docs:
+                if fps.get(i) != seen.get(i):
+                    # First sighting counts as settled: export right away if it isn't already.
+                    changed_at[i] = now if i in seen else now - SYNC_IDLE
+                    seen[i] = fps.get(i)
+            names = [stem(p) for p in docs.values()]
+            for i, p in sorted(docs.items(), key=lambda ip: ip[1]):
+                rec = state.get(i, {})
+                if rec.get("done") == seen[i] or retry_at.get(i, 0) > now:
+                    continue
+                if not final and now - changed_at[i] < SYNC_IDLE:
+                    continue
+                rel = stem(p) + (f"-{i[:8]}" if names.count(stem(p)) > 1 else "") + ".pdf"
+                dest = os.path.join(out, rel)
+                # Never clobber a file that's been edited here, or that sync didn't write.
+                if os.path.exists(dest):
+                    st = os.stat(dest)
+                    mine = rec.get("file") == rel and rec.get("wrote") == [st.st_size, st.st_mtime_ns]
+                    if not mine:
+                        if held.get(i) != (st.st_size, st.st_mtime_ns):
+                            log(f"{rel}: changed on the tablet, but the copy here was edited (or isn't"
+                                f" from sync); leaving it. Move it aside to get the new version.")
+                            held[i] = (st.st_size, st.st_mtime_ns)
+                        continue
+                fp = seen[i]
+                try:
+                    data = fetch(f"/download/{i}/pdf", timeout=180)
+                except SystemExit as e:
+                    problem(f"export failed: {e}. If the cable is in, toggle the USB web interface"
+                            f" setting off/on. Retrying.")
+                    retry_at[i] = now + SYNC_IDLE
+                    continue
+                os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+                tmp = dest + ".part"
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                note = ""
+                if palette:
+                    try:
+                        recolor_pdf(tmp, palette)
+                    except Exception as e:
+                        note = f", ink remap FAILED ({e}); stock colors kept"
+                os.replace(tmp, dest)
+                st = os.stat(dest)
+                state[i] = {"file": rel, "done": fp, "wrote": [st.st_size, st.st_mtime_ns]}
+                with open(state_path + ".part", "w") as f:
+                    json.dump(state, f, indent=1)
+                os.replace(state_path + ".part", state_path)
+                last_problem[0] = None
+                log(f"saved {rel} ({len(data) // 1024} KB{note})")
+        if final:
+            log("stopped")
+            return
+        for _ in range(SYNC_POLL * 4):
+            if stopping:
+                break
+            time.sleep(0.25)
+
+
 def main(argv):
-    if not argv or argv[0] not in ("ls", "get", "put"):
+    if not argv or argv[0] not in ("ls", "get", "put", "sync"):
         sys.exit(__doc__)
     if argv[0] == "put":
         put(argv[1:])
+    if argv[0] == "sync":
+        return sync(argv[1:])
     docs = sorted(walk(), key=lambda pd: pd[1]["ModifiedClient"], reverse=True)
     if argv[0] == "ls":
         # Tablet clock is unreliable, so the dates are only good for ordering.
@@ -349,26 +564,7 @@ def main(argv):
         i = args.index("-o")
         out = args[i + 1]
         del args[i:i + 2]
-    palette = None
-    if "--palette" in args:
-        i = args.index("--palette")
-        if i + 1 >= len(args):
-            sys.exit("--palette needs 'projector' or a palette file/JSON (viewer: Copy palette)")
-        src = args[i + 1]
-        del args[i:i + 2]
-        if src == "projector":
-            table = palette_table(PROJECTOR)
-        else:
-            try:
-                p = json.loads(src) if src.lstrip().startswith("{") else json.load(open(src))
-            except (OSError, ValueError) as e:
-                sys.exit(f"palette {src!r}: {e}")
-            if not isinstance(p, dict) or not isinstance(p.get("inks"), dict):
-                sys.exit(f"palette {src!r}: expected the viewer's Copy palette JSON ({{bg, inks}})")
-            table = palette_table(p["inks"])
-        if not table:
-            sys.exit(f"palette {src!r}: no mappable ink (green/blue/yellow/red are the pens exports can recolor)")
-        palette = table
+    palette = pop_palette(args)
     if not args:
         sys.exit("usage: ./run get [-o DIR] [--palette projector|FILE] NAME|ID|--last ...")
     os.makedirs(out, exist_ok=True)

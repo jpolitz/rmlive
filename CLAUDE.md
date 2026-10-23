@@ -23,6 +23,10 @@ Give Joe a short usage reminder before anything else:
   `CSE11FA26-drafts`), one true copy per document in the class folder.
 - `./run ls` lists documents; `./run get NAME|ID|--last ...` downloads them
   as PDFs with ink into the current directory (`-o DIR` elsewhere).
+- `./run --sync FOLDER [-o DIR]` (or `./run sync FOLDER [-o DIR]` while
+  already running) keeps PDFs of FOLDER's documents current on the Mac
+  while plugged in, so they're there after a hurried unplug. `./run sync`
+  shows status, `./run sync stop` stops it. Never uploads anywhere.
 
 Then check whether the tablet is reachable (`./run status`) and say so. Keep
 it brief and let Joe drive.

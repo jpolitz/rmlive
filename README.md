@@ -29,7 +29,8 @@ Plug in the tablet (developer mode, `remarkable` ssh alias pointing at
 ```
 ./run              # build, deploy if changed, (re)start, open http://10.11.99.1:8099/
 ./run --prof       # same, with profiling logs on
-./run stop         # stop it on the tablet
+./run --sync CSE11-Lectures -o ~/cse11/notes   # same, plus sync (below)
+./run stop         # stop it on the tablet (and sync)
 ./run status       # running? what does the log say?
 ./run log          # tablet-side log
 ./run prof         # pull profiling logs and print a summary
@@ -43,6 +44,9 @@ Plug in the tablet (developer mode, `remarkable` ssh alias pointing at
 ./run get -o ~/Desktop Notebook   # -o picks the directory
 ./run get --palette projector regions.pdf   # ink remapped to the Projector palette
 ./run get --palette my.json regions.pdf     # palette = viewer "Copy palette" JSON (file or inline)
+./run sync -o ~/cse11/notes CSE11-Lectures   # keep PDFs of a folder current while plugged in
+./run sync                        # running? recent log
+./run sync stop
 ```
 
 `./run put` uses the tablet's USB web interface (`POST /upload`, the
@@ -83,6 +87,29 @@ anything does, otherwise as a substring, and every match is downloaded;
 duplicate names get an ID suffix. Folders are searched too. `--last` is
 the most recently modified document. The tablet's clock is off, so the dates
 in `./run ls` are good for ordering only.
+
+`./run sync` is for "unplugged in a hurry after lecture, where's the PDF?":
+while the cable is in, it keeps `DIR/<folder path>/<name>.pdf` (the same
+export as `get`, `--palette` included) current for every document under
+the folder, so the latest copy is already on the Mac. It runs in the
+background on the Mac (log in `target/sync.log`). It survives the cable
+coming out and picks up when the tablet comes back. It never uploads
+anywhere.
+
+- Every 5 s, one ssh call (over a reused connection) lists each document's
+  file sizes and mtimes. Only whether those change matters, so the tablet's
+  wrong clock doesn't.
+- A document is exported once it has changed and then sat untouched for
+  30 s. Exports render on the tablet's CPU, so they happen in your pauses,
+  which are also when you'd unplug. Unchanged documents cost nothing.
+- `DIR/.rmlive-sync.json` remembers what was exported, so restarting sync
+  doesn't re-export anything.
+- A local copy that's been edited (or wasn't written by sync) is never
+  overwritten; sync logs it and skips that document until you move the file
+  aside. Nothing local is ever deleted; a renamed or moved document gets a
+  new file. Writes are temp-file-then-rename, so pulling the cable
+  mid-export can't leave a broken PDF.
+- `./run sync stop` (and `./run stop`) export anything still pending first.
 
 `./run [--prof] [interval_ms]` passes its arguments to the binary. The
 default poll interval is 33 ms. The streamer doesn't survive a tablet
